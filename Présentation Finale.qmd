@@ -1,0 +1,2887 @@
+---
+title: "Group Task"
+author: "Sara Cristina Herranz (71317546C), Mathieu Bietrix (100517341), Laura Martinez (100408925), Carlos San Juan (100430897), Daniel Pérez (100407543) "
+format:
+  revealjs:
+    theme: 'night'
+    font:
+      family: "Poppins, sans-serif"
+    toc: true
+    toc-location: right
+    toc-title: Índice
+highlight-style: monokai
+editor: visual
+---
+
+## Instructions (read before starting) {visibility="hidden"}
+
+-   Modify within the `.qmd` document your personal data (names and ID) located in the header of the file.
+
+-   Make sure, **BEFORE further editing** the document, that the `.qmd` file is rendered correctly and the corresponding `.html` is generated in your local folder on your computer.
+
+-   The chunks (code boxes) created are either empty or incomplete. Once you edit what you consider, you must change each chunk to `#| eval: true` (or remove it directly) for them to run.
+
+-   Remember that you can run chunk by chunk with the *play* button or run all chunks up to a given chunk (with the button to the left of the previous one).
+
+### Required packages {visibility="hidden"}
+
+> Insert in the lower chunk the packages you will need
+
+```{r}
+#rm(list = ls())
+library(tidyverse)
+library(glue)
+library(lubridate)
+library(sysfonts)
+library(ggiraph)
+library(ggpubr)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(htmltools)
+library(leaflet)
+library(ggplot2)
+library(sf)
+library(sp)
+library(stringr)
+library(magrittr)
+library(tibble)
+library(leaflet.extras2)
+library(ggtext)
+library(ggmap)
+library(RColorBrewer)
+library(mapproj)
+```
+
+## Group task {visibility="hidden"}
+
+### Data {visibility="hidden"}
+
+The practice will be based on the **electoral data archives** that we have already worked on, compiling data on elections to the Spanish Congress of Deputies from 2018 to the present.
+
+```{r}
+#NO TOQUES NADA
+
+election_data <- read_csv(file = "./datos_elecciones_brutos.csv")
+cod_mun <- read_csv(file = "./cod_mun.csv")
+surveys <- read_csv(file = "./historical_surveys.csv")
+abbrev <- read_csv(file = "./siglas.csv")
+```
+
+# Cleaning the data and creating new datasets {visibility="hidden"}
+
+### **Filtering data** {visibility="hidden"}
+
+```{r}
+
+surveys <- surveys |> 
+  mutate(fieldworkcount = as.numeric(interval(field_date_from, field_date_to) / ddays(1)), .after = field_date_to) |> 
+  filter(year(date_elec) >=2018, exit_poll== FALSE, fieldworkcount >= 1, size >= 750)
+
+election_data <- election_data |> 
+  filter(anno >= 2008)
+```
+
+### **Tidy data** {visibility="hidden"}
+
+But first we will check the variance of certain variables that we suspect that could be irrelevant/non-variant.
+
+```{r}
+
+#election data
+election_data$tipo_eleccion <- as.factor(election_data$tipo_eleccion)
+
+election_data |>
+  select(c(tipo_eleccion, vuelta, codigo_distrito_electoral)) |> 
+  summary()
+
+#survey data
+surveys$type_survey <- as.factor(surveys$type_survey)
+
+summary(surveys$type_survey)
+summary(surveys$EV)
+```
+
+Now that we have seen that there is no variance in the previous variables we will proceed to delete them:
+
+```{r}
+
+#Clean election data
+election_data_clean <- election_data|>
+  pivot_longer(cols = 16:471,
+               names_to = "party", 
+               values_to = "votes") |> 
+  mutate(party = as.factor(party)) |>
+  drop_na(votes) |> 
+  select(-c(tipo_eleccion, vuelta, codigo_distrito_electoral))
+
+election_data_clean <- election_data_clean |> 
+  mutate(date = as.Date(glue("{anno}-{mes}-01")))|>
+  select(c(-mes, -anno)) |> 
+  relocate(date, .before = codigo_ccaa)
+
+election_data_clean <- election_data_clean |> mutate(cod_mun = glue("{codigo_ccaa}-{codigo_provincia}-{codigo_municipio}")) |> 
+  relocate(cod_mun, .before = numero_mesas)
+
+
+#Clean Surveys data
+surveys_clean<- surveys|> 
+  pivot_longer(cols = 12:60,
+               names_to = "party", 
+               values_to = "votes_intentions") |> 
+  select(-type_survey, -exit_poll)
+```
+
+Now let´s perform some joins to be able to better analyse the data.
+
+```{r}
+
+#for the elections dataset
+election_data_clean <- inner_join(election_data_clean, cod_mun, by = "cod_mun") |> 
+  relocate(municipio, .before = numero_mesas)
+
+abbrev <- abbrev |> 
+  rename(party = denominacion,
+         abrev = siglas) #for future joins
+
+#for the survey dataset
+surveys_clean <- surveys_clean |> 
+  rename(abrev = party)
+```
+
+Since there are many different abbreviations for each party let´s sort this issue:
+
+```{r}
+
+uniqueparties <- data.frame(party = unique(election_data_clean$party))
+uniqueparties1 <- data.frame(abrev = unique(surveys_clean$abrev))
+uniqueparties <- left_join(uniqueparties, abbrev, by = "party")
+uniqueparties1 <- left_join(uniqueparties1, abbrev, by = "abrev")
+
+# # these tables were created to choose among all the possible abbreviations for each of the parties in each dataset
+```
+
+Now we recategorize the parties:
+
+```{r}
+
+election_data_clean <- election_data_clean |> 
+  mutate(party_acronym = case_when(
+    str_detect(party, "PARTIDO DOS SOCIALISTAS DE GALICIA-PSOE") |
+    str_detect(party, "PARTIDO SOCIALISTA DE EUSKADI-EUSKADIKO EZKERRA \\(P") |
+    str_detect(party, "PARTIDO SOCIALISTA DE EUSKADI-EUSKADIKO EZKERRA \\(PSOE") |
+    str_detect(party, "PARTIDO SOCIALISTA OBRERO ESPAÑOL") |
+    str_detect(party, "PARTIT DELS SOCIALISTES DE CATALUNYA") |
+    str_detect(party, "PARTIT DELS SOCIALISTES DE CATALUNYA \\(PSC-PSOE") |
+    str_detect(party, "PARTIT SOCIALISTA OBRER ESPANYOL") |
+    str_detect(party, "PARTIDO DOS SOCIALISTAS DE GALICIA-PARTIDO SOCIALI") ~ "PSOE",
+    
+    str_detect(party, "PARTIDO POPULAR-FORO") |
+    str_detect(party, "PARTIDO POPULAR / PARTIT POPULAR") |
+    str_detect(party, "PARTIDO POPULAR, PARTIDO POPULAR - FORO") |
+    str_detect(party, "PARTIDO POPULAR/PARTIT POPULAR") |
+    str_detect(party, "PARTIT POPULAR-PARTIDO POPULAR") |
+    str_detect(party, "PARTIDO POPULAR") |
+    str_detect(party, "PARTIT POPULAR/PARTIDO POPULAR") ~ "PP", 
+    
+    str_detect(party, "CIUDADANOS-PARTIDO DE LA CIUDADANÍA") |
+    str_detect(party, "CIUTADANS-PARTIDO DE LA CIUDADANÍA") |
+    str_detect(party, "NAVARRA SUMA") ~ "CS",
+    
+    str_detect(party, "EUZKO ALDERDI JELTZALEA-PARTIDO NACIONALISTA VASCO") ~ "PNV",
+    
+    str_detect(party, "BLOQUE NACIONALISTA GALEGO") ~ "BNG",
+    
+    str_detect(party, "COMPROMÍS: BLOC-INICIATIVA-VERDSEQUO") ~ "COMPROMÍS 2",
+    
+    str_detect(party, "CONVERGENCIA I UNIO") |
+    str_detect(party, "CONVERGENTS") ~ "CIU",
+    
+    str_detect(party, "IU") |
+    str_detect(party, "LOS VERDES") |
+    str_detect(party, "UNIDAS PODEMOS-XUNÍES PODEMOS") |
+    str_detect(party, "EN COMÚN-UNIDAS PODEMOS") |
+    str_detect(party, "UNIDAS PODEMOS") |
+    str_detect(party, "UNIDAS PODEMOS-ALTOARAGÓN EN COMÚN") |
+    str_detect(party, "UNIDAS PODEMOS-UNIDES PODEM") |
+    str_detect(party, "UNIDAS PODEMOS-XUNIES PODEMOS") ~ "UP",
+    
+    str_detect(party, "ESQUERRA REPUBLICANA DE CATALUNYA-SOBIRANISTES") ~ "ERC",
+    
+    str_detect(party, "EUSKAL HERRIA BILDU") ~ "BILDU",
+    
+    str_detect(party, "VOX") ~ "VOX",
+    
+    str_detect(party, "MÁS PAÍS-CANDIDATURA ECOLOGISTA") |
+    str_detect(party, "MÁS PAÍS-EQUO") |
+    str_detect(party, "MÁS PAÍS") |
+    str_detect(party, "MÁS PAÍS-ANDALUCÍA") |
+    str_detect(party, "MÁS PAÍS-CHUNTA ARAGONESISTA-EQUO") |
+    str_detect(party, "MÉS COMPROMÍS") ~ "MÁS PAÍS",
+    
+    TRUE ~ "OTHERS"
+  ))|> 
+  relocate(party_acronym, .before = votes)
+```
+
+```{r}
+
+election_data_clean <- election_data_clean|> 
+  group_by(date, party_acronym, cod_mun) |> 
+  mutate(votos = sum(votes)) |> 
+  ungroup() |> 
+  select(-votes, -party) |> 
+  distinct()
+```
+
+## Question 1. **How is the vote of national parties (PSOE, PP, VOX, CS, MP, UP - IU) distributed against regional or nationalist parties?** {visibility="hidden"}
+
+```{r}
+
+# Creating vectors that hold the parties in each category (regionalist/national)
+national_parties <- c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")
+
+regional_parties <- election_data_clean |> 
+  filter(!(party_acronym %in% national_parties) & party_acronym != "OTHERS") |> 
+  pull(party_acronym)
+
+
+# Calculating percentage votes for each combination of party_type and date
+Q1 <- election_data_clean |> 
+  group_by(party_type = if_else(party_acronym %in% national_parties, "National",
+                                if_else(party_acronym %in% regional_parties, "Regional",
+                                        "OTHERS")), date) |>
+  filter(party_type %in% c("National", "Regional")) |> 
+  summarise(total_votes = sum(votos)) |> 
+  group_by(date) |> 
+  mutate(ptg_votes = round((total_votes / sum(total_votes)) * 100, 2)) |> 
+  ungroup() |> 
+  arrange(date) 
+
+Q1
+```
+
+### **Enhancement 1** {visibility="hidden"}
+
+Ploting how national and regional parties are distributed. Specifically, it plots the percentage of each party type for each election
+
+```{r, fig.width=7, fig.height=9}
+
+# Creating a new variable with the dates to make it more readible
+Q1 <- Q1 |> 
+  mutate(facetdate = case_when(date == "2008-03-01" ~ "2008",
+                               date == "2011-11-01" ~ "2011",
+                               date == "2015-12-01" ~ "2015",
+                               date == "2016-06-01" ~ "2016",
+                               date == "2019-04-01" ~ "April 2019",
+                               date == "2019-11-01" ~ "November 2019"), 
+         .before = date) 
+
+# Text font
+sysfonts::font_add_google("Fira Sans Condensed", family = "sans-serif")
+sysfonts::font_add_google("Fira Sans", family = "sans-serif")
+showtext::showtext_auto()
+
+font_add_google("Fira Sans Condensed")
+font_add_google("Fira Sans")
+
+
+# Plot
+Q1_plot <- ggplot(data = Q1) +
+  aes(x = party_type, y = ptg_votes, fill = party_type) +
+  geom_bar(stat = "identity", alpha = 0.7) + 
+  geom_text(aes(x = party_type, y = ptg_votes, label = scales::percent(ptg_votes/100, 1)),
+            position = position_dodge(width = 1),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("#D82327", "#2150c6"), guide = FALSE) +
+  labs(title = "Distribution of votes: national vs. regional parties \n",
+       x = NULL,
+       y =  NULL) +
+  scale_y_continuous(labels = scales::comma_format(), 
+                     expand = expansion(mult = c(0, .1)),
+                     breaks = seq(from = 20, to = 100, by = 40)) +
+  facet_wrap(~facetdate, scales = "free_x", ncol = 2) +
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.spacing.y = unit(2.5, "lines"),
+        legend.position = "none",
+        plot.title = element_text(family = "Fira Sans Condensed", 
+                                  size = 14, 
+                                  face = "bold"),
+        axis.text.x = element_text(family = "Fira Sans Condensed"), 
+        axis.text.y = element_text(family = "Fira Sans Condensed"),
+        axis.title = element_text(family = "Fira Sans Condensed"), 
+        strip.text = element_text(face = "bold", size = 10))
+
+Q1_plot
+```
+
+### Enhancement 2 {visibility="hidden"}
+
+```{r eval=FALSE}
+#add provincias shapefile
+mun_shp <- read_sf("georef-spain-municipio-millesime.shp")
+
+mun_shp <- mun_shp |> 
+  select(mun_code, geometry) |> 
+  unique()
+
+mun_shp <- mun_shp %>%
+  rename(cod_mun = mun_code)
+
+map_data <- election_data_clean|> 
+  select(-cod_mun) |> 
+  mutate(cod_mun = glue("{codigo_provincia}{codigo_municipio}")) |> 
+  relocate(cod_mun, .before = municipio)
+
+map_data <- map_data |> 
+  select(-codigo_ccaa, -codigo_provincia, -codigo_municipio, 
+         -numero_mesas, -participacion_1, -participacion_2)
+
+map_data <- left_join(mun_shp, map_data, by = "cod_mun")
+
+#now we create the categories for the 2 types of parties
+national_parties <- c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")
+
+regional_parties <- election_data_clean |> 
+  filter(!(party_acronym %in% national_parties) | party_acronym == "OTHERS") |> 
+  pull(party_acronym)
+
+map_data <- map_data |> 
+  mutate(party_type = ifelse(party_acronym %in% national_parties, "National", "Regional")) |> 
+  select(-party_acronym)
+
+
+#compute the avg % of votes of each party
+map_data <- map_data |> 
+  group_by(date, cod_mun, party_type) |> 
+  mutate(ttl_votos = sum(votos), 
+         pcg_partyvotes = round(ttl_votos / (votos_nulos + votos_blancos + votos_candidaturas) * 100, 2)) |> 
+  ungroup()
+
+map_data <- map_data |> 
+  select(-censo, -votos_blancos, -votos_nulos, 
+         -votos_candidaturas, -votos, -ttl_votos) |> 
+  unique()
+
+
+#We need to have our data in WGS84
+st_crs(map_data$geometry) #we do
+
+#we need to do a pivot wider
+as.character(map_data$party_type)
+
+
+#alternative code as the pivot_wider did not recognise my variable party_type
+map_data <- map_data |> 
+  spread(key = party_type, value = pcg_partyvotes) |> 
+  mutate_all(~replace(., is.na(.), 0)) #takes time as well
+
+# Making a winner column
+map_data <- mutate(map_data, winner = if_else(National > Regional, "National", "Regional"))
+
+#filtering the dataset for many different maps
+map_data_2008 <- map_data |> 
+  filter(date == "2008-03-01")
+
+map_data_2011 <- map_data |> 
+  filter(date == "2011-11-01")
+
+map_data_2015 <- map_data |> 
+  filter(date == "2015-12-01")
+
+map_data_2016 <- map_data |> 
+  filter(date == "2016-06-01")
+
+map_data_apr <- map_data |> 
+  filter(date == "2019-04-01")
+
+map_data_nov <- map_data |> 
+  filter(date == "2019-04-01")
+
+
+#min_max values 
+#map1(2008)
+map_data_2008 <- mutate(map_data_2008, margin = abs(National - Regional))
+min_max_values1 <- range(map_data_2008$margin, na.rm = TRUE)
+
+#map2(2011)
+map_data_2011 <- mutate(map_data_2011, margin = abs(National - Regional))
+min_max_values2 <- range(map_data_2011$margin, na.rm = TRUE)
+
+#map3(2015)
+map_data_2015 <- mutate(map_data_2015, margin = abs(National - Regional))
+min_max_values3 <- range(map_data_2015$margin, na.rm = TRUE)
+
+#map4(2016)
+map_data_2016 <- mutate(map_data_2016, margin = abs(National - Regional))
+min_max_values4 <- range(map_data_2016$margin, na.rm = TRUE)
+
+#map5(apr_19)
+map_data_apr <- mutate(map_data_apr, margin = abs(National - Regional))
+min_max_values5 <- range(map_data_apr$margin, na.rm = TRUE)
+
+#map6(nov_19)
+map_data_nov <- mutate(map_data_nov, margin = abs(National - Regional))
+min_max_values6 <- range(map_data_nov$margin, na.rm = TRUE)
+
+
+#Now we create the colour palette taking the lightest
+#colour the smallest number of the margin between votes
+
+#map1
+regional_palette1 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values1[1], min_max_values1[2]))
+national_palette1 <- colorNumeric(palette = "Blues", 
+                               domain=c(min_max_values1[1], min_max_values1[[2]]))
+
+#map2
+regional_palette2 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values2[1], min_max_values2[2]))
+national_palette2 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values2[1], min_max_values2[[2]]))
+
+#map3
+regional_palette3 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values3[1], min_max_values3[2]))
+national_palette3 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values3[1], min_max_values3[[2]]))
+#map4
+regional_palette4 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values4[1], min_max_values4[2]))
+national_palette4 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values4[1], min_max_values4[[2]]))
+
+#map5
+regional_palette5 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values5[1], min_max_values5[2]))
+national_palette5 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values5[1], min_max_values5[[2]]))
+
+#map6
+regional_palette6 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values6[1], min_max_values6[2]))
+national_palette6 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values6[1], min_max_values6[[2]]))
+
+
+
+#Creating two different data frames for each type of party (for each year)
+#2008
+regional_df1 <- map_data_2008[map_data_2008$winner == "Regional",]
+national_df1 <- map_data_2008[map_data_2008$winner == "National",]
+#2011
+regional_df2 <- map_data_2011[map_data_2011$winner == "Regional",]
+national_df2 <- map_data_2011[map_data_2011$winner == "National",]
+#2015
+regional_df3 <- map_data_2015[map_data_2015$winner == "Regional",]
+national_df3 <- map_data_2015[map_data_2015$winner == "National",]
+#2016
+regional_df4 <- map_data_2016[map_data_2016$winner == "Regional",]
+national_df4 <- map_data_2016[map_data_2016$winner == "National",]
+#apr 2019
+regional_df5 <- map_data_apr[map_data_apr$winner == "Regional",]
+national_df5 <- map_data_apr[map_data_apr$winner == "National",]
+#nov 2019
+regional_df6 <- map_data_nov[map_data_nov$winner == "Regional",]
+national_df6 <- map_data_nov[map_data_nov$winner == "National",]
+
+
+
+#Create a popup
+
+#map1
+national_popup1 <- glue("<strong>{national_df1$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df1$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df1$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df1$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup1 <- glue("<strong>{regional_df1$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df1$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df1$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df1$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map2
+national_popup2 <- glue("<strong>{national_df2$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df2$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df2$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df2$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup2 <- glue("<strong>{regional_df2$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df2$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df2$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df2$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map3
+national_popup3 <- glue("<strong>{national_df3$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df3$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df3$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df3$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup3 <- glue("<strong>{regional_df3$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df3$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df3$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df3$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map4
+national_popup4 <- glue("<strong>{national_df4$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df4$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df4$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df4$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup4 <- glue("<strong>{regional_df4$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df4$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df4$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df4$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map5
+national_popup5 <- glue("<strong>{national_df5$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df5$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df5$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df5$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup5 <- glue("<strong>{regional_df5$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df5$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df5$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df5$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map6
+national_popup6 <- glue("<strong>{national_df6$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df6$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df6$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df6$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup6 <- glue("<strong>{regional_df6$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df6$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df6$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df6$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+
+
+#Then we overlay the data
+library(mapview)
+
+#map 1
+m1 <- mapview(
+  national_df1,
+  col.regions = national_palette1(national_df1$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup1,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df1,
+    col.regions = regional_palette1(regional_df1$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup1,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 2
+m2 <-mapview(
+  national_df2,
+  col.regions = national_palette2(national_df2$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup2,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df2,
+    col.regions = regional_palette2(regional_df2$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup2,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 3
+m3 <-mapview(
+  national_df3,
+  col.regions = national_palette3(national_df3$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup3,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df3,
+    col.regions = regional_palette3(regional_df3$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup3,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 4
+m4 <-mapview(
+  national_df4,
+  col.regions = national_palette4(national_df4$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup4,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df4,
+    col.regions = regional_palette4(regional_df4$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup4,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 5
+m5 <-mapview(
+  national_df5,
+  col.regions = national_palette5(national_df5$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup5,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df5,
+    col.regions = regional_palette5(regional_df5$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup5,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 5
+m6 <-mapview(
+  national_df6,
+  col.regions = national_palette6(national_df6$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup6,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df5,
+    col.regions = regional_palette6(regional_df6$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup6,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#now we make the comparisons
+m1 | m2
+m2 | m3
+m3 | m4
+m4 | m5
+m5 | m6
+
+```
+
+## Question 2. **Which party was the winner in the municipalities with more than 100,000 habitants (census) in each of the elections?** {visibility="hidden"}
+
+```{r}
+
+Q2 <- election_data_clean |> 
+  filter(censo > 100000) |> 
+  group_by(date, municipio) |> 
+  slice(which.max(votos)) |> 
+  select(date, municipio, party_acronym, votos) |> 
+  arrange(municipio) |> 
+  ungroup() 
+
+Q2 
+```
+
+Qué hacemos con esta pregunta para la visualización?
+
+## Question 3. **Which party was the second when the first was the PSOE? And when the first was the PP?** {visibility="hidden"}
+
+```{r}
+
+# Creating a ranking for each election 
+Q3 <- election_data_clean |> 
+  group_by(date, party_acronym) |>
+  mutate(sum_votes = sum(votos)) |> 
+  distinct(date, party_acronym, .keep_all = TRUE) |> 
+  select(date, party_acronym, sum_votes) |>
+  ungroup(party_acronym) |> 
+  mutate(rank = rank(-sum_votes)) |> 
+  arrange(date, rank)
+```
+
+```{r}
+
+# Filtering for elections where the first party is PSOE
+rank_second <- function(dataset, party){
+  
+  #spot the election in which the specified party has won
+  winning_election <-
+    dataset |> 
+    filter(rank == 1, party_acronym == party) |>
+    select(date) |> 
+    as_vector()
+  
+  party_ranked_second <-
+    dataset |> 
+    mutate(date = as.numeric(date)) |> # done because the as_vector function previously used automatically converts the dates in winning_election into numerics. If we want to use the %in% operator, we need to have the same data type, so we turn all dates into numerics.
+    filter(date %in% winning_election &
+             rank == 2) |> 
+    mutate(date = as_date(date))
+ 
+    return(party_ranked_second)
+  }
+```
+
+```{r}
+
+# 2nd when the first party is PSOE
+second_party_psoe <-
+  rank_second(Q3, 'PSOE')
+
+# 2nd when the first party is PP
+second_party_pp <- 
+  rank_second(Q3, 'PP')
+```
+
+When the first party was PSOE in each election, PP was second in the elections of 2008, April 2019, and November 2019. On the other hand, when PP led the elections in 2011 and 2016, PSOE and the sum of other parties (OTHERS) took the second position. The year 2015 is missing from this comparison because the category OTHERS secured the top rank. Additionally, in 2016, the second-ranking party was also categorized as OTHERS.
+
+## Question 4. Who benefits from low turnout? {visibility="hidden"}
+
+This question was done under the following premise: "**you must work only in the time window that includes the elections from 2018 to the last elections of 2019"** as it was done before the real timeframe was finally clarified. Thus, we applied a filter to our tidy data, election_data_clean, to satisfy said time frame:
+
+```{r}
+
+election_data_clean18 <- election_data_clean |> 
+  filter(date %in% c("2019-04-01", "2019-11-01")) |> 
+  mutate(date = case_when(date == "2019-04-01" ~ ymd("2019-04-28"),
+                          date == "2019-11-01" ~ ymd("2019-11-10")))
+```
+
+First we create a **participation rate variable**
+
+```{r}
+ # For each of the two elections
+  # Across all municipalities (national level)
+election_data_clean18 <- election_data_clean18 |> 
+  group_by(date) |> 
+  mutate(participation_rate = mean((votos_candidaturas + votos_nulos + votos_blancos)/censo), .before = party_acronym)
+```
+
+```{r}
+
+# Group by party and calculate average participation rate and average votes
+Q4 <- election_data_clean18 |> 
+  group_by(date, party_acronym) |> 
+  mutate(avg_votes = (mean(votos) / mean(votos_candidaturas + votos_nulos + votos_blancos))) |>
+  ungroup() |> 
+  distinct(date, party_acronym, .keep_all = TRUE) 
+
+# Select only the necessary columns
+Q4 <- Q4|> 
+  select(
+    date,
+    party_acronym,
+    participation_rate,
+    avg_votes) |> 
+  group_by(date) |> 
+  arrange(desc(avg_votes)) |> 
+  ungroup() 
+```
+
+```{r}
+
+# Now we see the difference in % votes between the elections
+Q4 <- Q4 |> 
+  pivot_wider(
+    id_cols = party_acronym,
+    names_from = date,
+    values_from = c(participation_rate, avg_votes)) 
+
+answer <- Q4 |> 
+  mutate(
+    diff_participation_rate = (`participation_rate_2019-11-10` - `participation_rate_2019-04-28`),
+    diff_avg_votes = (`avg_votes_2019-11-10` - `avg_votes_2019-04-28`)) |> 
+   select(party_acronym, diff_participation_rate, diff_avg_votes) |> 
+   arrange(desc(diff_avg_votes))
+
+answer
+```
+
+As we can see from the data:
+
+-   COMPROMÍS disappeared on the November elections
+
+-   CIU also disappeared on the November elections
+
+-   Mas País appeared in the November elections (created explicitly for that)
+
+We can see that at least in this case lower participation benefits smaller parties (also Vox was quite small until it had a great success in the November elections), so, apart from PP (might be an outlier given the political context of those elections), mostly smaller parties were benefited from a lower turnout as well as I would say conservative and nationalist parties.
+
+```{r, fig.width=8, fig.height=6, out.width="100%"}
+
+# Convert party_acronym to a factor
+answer$party_acronym <- factor(answer$party_acronym, levels = unique(answer$party_acronym))
+
+# Create a bar plot
+Q4_plot <- ggplot(data = answer) +
+  aes(x = party_acronym, y = diff_avg_votes, fill = factor(sign(diff_avg_votes))) +
+  geom_bar(stat = "identity", alpha = 0.7) +
+  geom_text(aes(x = party_acronym, y = diff_avg_votes, label = round(diff_avg_votes, 2)),
+            position = position_dodge(width = 1),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("#D82327", "#2150c6"), guide = FALSE) +
+  labs(title = "Differences in average votes when turnout decreases by Party",
+       x = NULL,
+       y = NULL)+
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.spacing.y = unit(2.5, "lines"),
+        legend.position = "none",
+        plot.title = element_text(family = "Fira Sans Condensed", 
+                                  size = 40, 
+                                  face = "bold"),
+        axis.text.x = element_text(family = "Fira Sans Condensed",
+                                   size = 30), 
+        axis.text.y = element_text(family = "Fira Sans Condensed",
+                                   size = 30),
+        axis.title = element_text(family = "Fira Sans Condensed",
+                                   size = 30))
+
+Q4_plot
+```
+
+## **Question 5. How to analyze the relationship between census and vote? Is it true that certain parties win in rural areas?** {visibility="hidden"}
+
+According to Article 3.a of Spanish Law 45/2007, rural areas in Spain encompass local villages and towns with both a population lower than 30,000 inhabitants and a population density lower than 100 inhabitants per square kilometer. Since the electoral data archives we are working with do not include population density among their variables, we will be using the census variable ("censo"). Later on we will create the especific categories we will be working with.
+
+To analise the relationship between census and vote, we have decided to keep working with what we did in the previous exercise, which is calculating the average participation rate or turnout.
+
+```{r}
+
+# Group by date and municipio. We get a participation rate by each municipio in each date, and we keep censo
+Q5  <- election_data_clean |> 
+  group_by(date, municipio) |> 
+  summarise(participation_rate = mean((votos_candidaturas + votos_nulos + votos_blancos) / censo, 
+                                      .before = party_acronym),
+            censo = first(censo),
+            censo_log = log(censo)) |> 
+  ungroup() |> 
+  arrange(date, desc(censo))
+
+# Correlation between census and participation rate
+cor5 <- Q5 |> 
+  with(cor(censo_log, participation_rate))
+
+cor5
+```
+
+We obtain a correlation of -0.2415 between the `censo_log` and `participation_rate`, indicating a negative and not too strong correlation. According to the correlation, as the census size proportionally increases (or decreases) in a municipality on a given date, the participation rate tends to decrease (or increase). Since it is a rather week correlation, the association between the two variables might be weak.
+
+We decided to run a regression with the participation rate as our dependent variable and `censo_log` as our explanatory variable, and took participation rate as a logarithm.
+
+```{r}
+
+# Performing a regression analysis
+Q5_reg <- Q5 |> 
+  mutate(participation_rate_log = log(participation_rate)) |> 
+  select(participation_rate_log, censo_log) 
+
+regression_q5 <- lm(participation_rate_log ~ censo_log, data = Q5_reg)
+
+summary(regression_q5)
+```
+
+The Ordinary Least Squares (OLS) regression analysis indicates that a 1% increase in the census size is associated with a decrease of approximately (-0.012)% in the relative participation rate or votes. Both coefficients are statistically significant with very low p-values (less than 2.2e-16), indicating a statistically significant relationship between the logarithm of the census size and the one of the participation rate.
+
+Finally, the adjusted coefficient of determination (Adjusted R-squared) is 0.04669, suggesting that approximately 4.67% of the variability in the logarithm of the voter turnout rate can be explained by the logarithm of the census population in the model.
+
+In summary, the model suggests a statistically significant relationship between the logarithm of the census population and the logarithm of the voter turnout rate, but the relationship is weak, as indicated by the relatively low adjusted coefficient of determination. Additionally, note that the interpretations are in terms of logarithms. Finally, it is important to keep into consideration that it is possible that there are other relevant variables that might affect the relationship between census and vote and that have not been considered in this analysis.
+
+```{r}
+
+# ratio_cv is the average ratio of votes to census for each party in each area and election. Not the same as participation rate
+Q5a <- election_data_clean |> 
+  mutate(mun_type = case_when(censo < 30000 ~ "rural",
+                              TRUE ~ "urban"), .after = municipio)  |> 
+  group_by(date, mun_type, party_acronym) |> 
+  summarise(ratio_cv = round(mean(votos / censo), 2)) |> 
+  ungroup() |> 
+  arrange(date, mun_type, desc(ratio_cv))
+```
+
+```{r, fig.width=15, fig.height=11}
+
+# Two way ANOVA analysis to compare the means
+  # We want to see the interaction of mun_type and party_acromym
+result_anova <- aov(ratio_cv ~ mun_type * party_acronym, data = Q5a)
+
+# Display ANOVA summary
+anova <- summary(result_anova)
+
+# Tukey analysis
+tukey <- TukeyHSD(aov(result_anova))
+
+Q5bp <- ggboxplot(Q5a, x = "party_acronym", y = "ratio_cv", color = "mun_type",
+          palette = c("#00AFBB", "#E7B800"),
+          ylab = FALSE, xlab = FALSE,
+          title = "Ratio votes/census by municipality type and party",
+          font.label = )
+
+Q5bp
+```
+
+The result of the analysis of variance (ANOVA) suggests that there are statistically significant effects for both the municipality type and the party acronym, but not a significant interaction between them
+
+First, the main effect of 'mun_type' is statistically significant (p \< 0.05) there are significant differences in the means of the average ratio of votes/census for each party between rural and urban municipalities.
+
+Second, the main effect of party is highly statistically significant (p \< 0.001), indicating that there are significant differences in the average ratio of votes/census among different political parties. This makes sense considering that said ratio was calculated for each party.
+
+In summary, both municipality type and party have a significant impact on the ratio of votes/census. However, the interaction effect between municipality type and political party does not appear to be statistically significant, suggesting that the influence of political party on the ratio of votes/census may be consistent across rural and urban municipalities.
+
+## Question 6: How to calibrate the error of the polls (remember that the polls are voting intentions at national level)? {visibility="hidden"}
+
+First let's take a look at all the unique abbreviations of the survey dataset.
+
+```{r}
+uniqueparties1
+```
+
+Now we group the abbreviations to keep only the parties we are interested in:
+
+```{r}
+Q6 <- surveys_clean |> 
+  mutate(party_acronym = case_when(
+    
+    str_detect(abrev, "PSOE") ~ "PSOE",
+    
+    str_detect(abrev, "PP") ~ "PP", 
+    
+    str_detect(abrev, "CS") ~ "CS",
+    
+    str_detect(abrev, "EAJ-PNV") ~ "PNV",
+    
+    str_detect(abrev, "BNG") ~ "BNG",
+    
+    str_detect(abrev, "COMPROMIS") ~ "COMPROMÍS 2",
+    
+    str_detect(abrev, "CIU") ~ "CIU",
+    
+    str_detect(abrev, "IU") |
+    str_detect(abrev, "PODEMOS") |
+    str_detect(abrev, "UP") ~ "UP",
+    
+    str_detect(abrev, "ERC") ~ "ERC",
+    
+    str_detect(abrev, "EA") |
+    str_detect(abrev, "EH") |
+    str_detect(abrev, "EH-BILDU") ~ "BILDU",
+    
+    str_detect(abrev, "VOX") ~ "VOX",
+    
+    str_detect(abrev, "MP") ~ "MÁS PAÍS",
+    
+    TRUE ~ "OTHERS"
+  ))|> 
+  relocate(party_acronym, .before = votes_intentions) |> 
+  select(-abrev)
+```
+
+Now we compute the % of votes for each party for each election. For this sake, we use the elections dataset
+
+```{r}
+
+# Select the relevant data for understanding sake
+Q6_1 <- election_data_clean18 |> 
+  select(date, cod_mun, votos_blancos, votos_nulos, votos_candidaturas, party_acronym, votos)
+
+#  Calculation of the votes received by each party in each election
+Q6_2 <- 
+  Q6_1 |> 
+  group_by(date, party_acronym) |> 
+  summarise(sum_votes = sum(votos))
+
+# Calculation of the total number of votes at a national scale in each election 
+Q6_3 <-
+  Q6_1 |> 
+  distinct(date, cod_mun, .keep_all = TRUE) |>  
+  group_by(date) |> 
+  summarise(total = sum(votos_blancos + votos_nulos + votos_candidaturas))
+
+# Joining the two previous datasets, creation of a dataset of total votes, and votes for each party, in each election 
+Q6_4 <-
+  Q6_2 |> 
+  left_join(Q6_3, by = c('date' = 'date'))
+
+# Calculation of the percentage of votes for each party, in each election. 
+Q6_5 <-
+  Q6_4 |> 
+  mutate(percentage_votes = (sum_votes/total)*100)
+
+percentage_votes <- Q6_5
+
+```
+
+\*For checking : <https://resultados.elpais.com/elecciones/2019-28A/generales/congreso/>
+
+We are computing the mean of votes intentions for each election and each media (because one poll can be published in various media)
+
+```{r}
+
+# Calculation of the mean of the votes intentions registered by each media towards each party, in each election 
+Q6_6 <-
+  Q6 |> 
+  group_by(date_elec, media, party_acronym) |> 
+  mutate(mean_votes_intentions = mean(votes_intentions, na.rm = TRUE)) |> 
+  distinct(media, .keep_all = TRUE)
+
+mean_vote_intentions <- Q6_6 
+```
+
+Let's join both `percentages_votes` and `mean_vote_intentions.`
+
+```{r}
+
+# Join votes intentions table with votes percentages tables, in order to compare both variable.
+Q6_7 <- 
+  mean_vote_intentions |> 
+  left_join(percentage_votes,
+            by = c('date_elec' = 'date','party_acronym'= 'party_acronym')) 
+
+# Calculation of the relative error between surveys and actual election results
+# relative error = ((real votes - vote intentions)/real votes)*100
+error_survey <-
+  Q6_7 |> 
+    mutate(relative_error_poll = abs(((percentage_votes-mean_votes_intentions )/percentage_votes)*100)) |> 
+    filter(relative_error_poll < 100)
+
+  
+```
+
+We decided to remove observations with a relative error greater than 100% to prevent our estimates from being overly affected by the presence of extreme values. Firstly, the Mean Absolute Percentage Error (MAPE) is generally expressed as a percentage and should therefore fall within the range of 0% to 100%. When MAPE is greater than 100%, it indicats that the survey predictions have an average absolute error that is more than double the actual value. This could suggest that the predictions are highly inaccurate and should be interpreted with extreme caution.
+
+For instance, some polls end up with percentage of errors of 200% or even 350%. Even though these outliers are scarce, we found that they were the source of high biase of the mean. In total, 23 of these outlier polls were removed. We make the asumption that among more than 500 polls, a share of 4.4% of outliers can reasonably be explained by survey errors or by cognitive biase on the part of the respondents.
+
+### Correlation computation {visibility="hidden"}
+
+Among the variables available in the data set, only one seem to us capital to study when looking at how to calibrate the error od the poll: the `size` variable. We therefore study the correlation between the `absolute_error_poll` and the `size` of the poll.
+
+```{r}
+
+# Computation of the correlation coefficient
+correlation <- 
+  error_survey |> 
+  drop_na(relative_error_poll) |> 
+  with(cor(relative_error_poll, size))
+
+correlation
+
+# Performing a regression analysis
+error_survey <- 
+  error_survey |> 
+  mutate (log_size = log(size)) |> 
+  mutate (log_relative_error_poll = log(relative_error_poll)) |> 
+  filter()
+
+regression_q6 <- lm(log_relative_error_poll ~ log_size, data= error_survey)
+
+summary(regression_q6)
+```
+
+We obtain a correlation of -0.024 between the `size` and the `absolute_error_survey`, indicating a weak and negative correlation. This means there is a very slight tendency that as the number of surveyed individuals increases, the relative error of the survey decreases. However, the relationship is weak, suggesting that there is no strong association between the two variables. To further investigate this, we will run a regression with the relative error as our dependent variable and size as our explanatory variable. To enhance interpretation, we take logarithms of both variables, and we interpret the coefficient B as elasticity.
+
+The Ordinary Least Squares (OLS) regression analysis indicates that a 1% increase in the survey size is associated with a decrease of approximately (-0.064)% in the relative survey error. However, it's important to note that this observed effect is not statistically significant at conventional confidence levels.
+
+We need to approach this result with caution due to the absence of additional explanatory variables in the model. The lack of additional variables might lead to an omission bias, meaning that relevant factors affecting the relationship between survey size and relative error may not have been considered.
+
+## Question 7 : In which election were the polls most wrong? {visibility="hidden"}
+
+```{r}
+Q7 <-
+ error_survey |> 
+    select(date_elec,id_pollster, pollster,media, relative_error_poll) |> 
+    ungroup()
+
+# Computation of the relative error of the polls in each election. 
+Q7_1 <-
+  Q7 |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec) |> 
+  summarise(mean_error = mean(relative_error_poll))
+```
+
+### Answer and enhancement {visibility="hidden"}
+
+Conclusion : The election in which the polls were the most wrong was the November 2019 election. Concretely, the average poll error in April 2019 was 22% while in November, this number went up to 29%. However, these numbers are biaised by two factors :
+
+-   This is a mean. Even by deleting the outliers previously, some of the polls still have error percentages very close to 100%. While it's obviously not the majority of the polls, they are weighted exactly as the other polls. Enhancement : We could use the median, which is less sensitive to the variance of the data.
+
+```{r}
+
+# Creating a new dataset, in case we need further manipulation of the data.
+error_survey_enhancement1 <-
+  Q6_7 |> 
+    mutate(relative_error_poll = abs(((percentage_votes-mean_votes_intentions )/percentage_votes)*100)) |> 
+    filter(relative_error_poll < 100)
+
+# Ungroup to ensure no grouping is still ongoing 
+Q7_enhancement1 <-
+ error_survey_enhancement1 |> 
+    select(date_elec,id_pollster, pollster,media, relative_error_poll) |> 
+    ungroup()
+
+Q7_1_enhancement1 <-
+  Q7_enhancement1 |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec) |> 
+  summarise(median_error = median(relative_error_poll))
+```
+
+The difference is significant, as expected. In April, the median of the error (precisely : the median of the absolute value, of the relative error) of the polls was 13%, and in November 18%. This seems more coherent on the one hand, and also confirms our first intuition that some marginal polls are biasing the average error of the polls.
+
+-   This margin of error gathers the absolute value of the relative error. Here, we are measuring how inaccurate is each poll. Therefore, a poll that forecasted 20% more votes intentions than the actual results has the same error than a poll that forecasted 20% less votes intentions.\
+    In other terms, they are both as inaccurate.
+
+    -   The variance in each election polls is inevitable, as a results of cognitive human biases and survey biases.
+
+    However, if we consider the polls as a conjunction of predictions for the elections, we may want to consider them altogether, therefore letting the underestimations of some polls balance the overestimations of others.\
+    From a cognitive point of view, this approach makes sense. Imagine this extreme thoeretical situation : There are only two parties in our country, Right and Left. I want to vote Right, you Left. Let's say the message of the Right party change, and I don't resonate with it anymore. I have two options : Left or white vote. If I choose Left, this means Left has also changed it's message. You'll therefore vote white or for Right. In the end, a certain balance happens.
+
+    Of course, this is not a realistic situation. Someone planning to vote to the right is very not expected to change her mind and vote to the left. But why would it not apply to two parties from the same part of the political spectrum?
+
+    This change of mind results in errors in the poll, but at the end of the day don't change the final result of each party.
+
+    Adopting to this more global point of view, we can recalculate the relative error of the polls, this time, without defining the error as the absolute value of the relative error. One detail still needs to be taken into account. If we only not take the absolute value, we will end up with a result that is close to 0 because
+
+```{r}
+
+# Computing this error with this alternative definition of the error, we will use the median here, as we explained earlier why it was a more accurate metric. 
+error_survey_enhancement2 <- 
+  Q6_7 |> 
+    mutate(relative_error_poll = ((percentage_votes-mean_votes_intentions )/percentage_votes)*100) |> 
+    filter(relative_error_poll < 100)
+
+Q7_enhancement2 <-
+ error_survey_enhancement2 |> 
+    select(date_elec,id_pollster, pollster,media, relative_error_poll) |> 
+    ungroup()
+
+Q7_1_enhancement2 <-
+  Q7_enhancement2 |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec) |> 
+  summarise(median_error = median(relative_error_poll))
+```
+
+The results are now clearly different. The median difference between the actual results of the elections and the polls in April 2019 is now reduced to around -1%, which means 1% underestimating results. On the other hand, the median error in the polls of November is around 1%, therefore slightly overestimating the results.
+
+Therefore, we can conclude that individually, polls are very inaccurate. However, considered altogether, which is what we do in reality, they can become good predictors of the final results of elections.
+
+*Final check: When looking at the quantiles, the intuition of using the median as a better choice is confirmed. Q1 and Q4 are composed of huge outliers.*
+
+## Question 8 : How were the polls wrong in national parties (PSOE, PP, VOX, CS, MP, UP - IU)? {visibility="hidden"}
+
+```{r}
+
+Q8 <-
+  error_survey |> 
+  select(date_elec,
+         id_pollster, 
+         pollster,
+         media, 
+         party_acronym, 
+         relative_error_poll) |> 
+  ungroup()
+  
+# Computing, in the same fashion as in Question 7, the mean of the error for polls concerning the national parties.
+Q8_1 <- 
+  Q8 |> 
+  filter(party_acronym %in% c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")) |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec, party_acronym) |> 
+  summarise(mean_error = mean(relative_error_poll)) |> 
+  ungroup()
+```
+
+The results are consistent with our previous output (Question 7). There is in average, more error in the election of November than in the April one. Let's add the enhancement of the method used in the previous question to have a clearer view of this difference.
+
+```{r}
+
+# Computation of the median of the relative error in National parties, in each election.
+
+Q8_1_enhancement <-
+  Q8 |> 
+  filter(party_acronym %in% c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")) |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec, party_acronym) |> 
+  summarise(median_error = median(relative_error_poll)) |> 
+  ungroup()
+
+# Plot of the median error made by the polls in forecasting the results of each national party, in each election.
+
+tooltip_css <- "background-color: rgba(245, 245, 245, 1);
+                color: #000000; font-family: 'Fira Sans Condensed', sans-serif;
+                font-size: 14px;
+                border-radius: 4px;
+                border: 1px solid #d9d9d9;
+                padding: 8px;"
+
+Q8_plot <-
+Q8_1_enhancement |> 
+  ggplot(
+  aes(
+    x = party_acronym,
+    y = median_error,
+    fill = as.factor(date_elec)
+  ),
+  position = position_dodge(width = 1),
+  vjust = -0.5, size = 3
+) +
+  geom_hline(yintercept = c(20, 40, 60, 80), 
+             linetype = "dashed", 
+             color = "grey") +
+  geom_bar_interactive(aes(
+    tooltip = paste0("Median error = <b>", round(median_error,2), '</b>'),
+    data_id = party_acronym),
+                       stat = "identity", 
+                       position = "dodge") +
+  labs(
+    title = "Median Error per Party and Election",
+    x = "Party",
+    y = "Median Error",
+    fill = "Date"
+  ) +
+  scale_fill_manual(values = c("#D82327", "#2150c6"),
+                    name = "Election",
+                    labels = c("April 2019", "November 2019")) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.spacing.y = unit(2.5, "lines"),
+    plot.title = element_text(
+      family = "Fira Sans Condensed",
+      size = 14,
+      face = "bold",
+      margin = margin(t = 10,
+                      b = 20)
+    ),
+    axis.text.x = element_text(family = "Fira Sans Condensed", 
+                               size = 11,
+                               vjust = 4),
+    axis.text.y = element_text(family = "Fira Sans Condensed",
+                               size = 11,
+                               margin = margin(t = 30)),
+    axis.title = element_text(family = "Fira Sans Condensed",
+                              face = 'bold'),
+    strip.text = element_text(face = "bold", size = 10),
+    legend.text = element_text(family = "Fira Sans Condensed", 
+                               size = 10),
+    legend.title = element_text(family = "Fira Sans Condensed", 
+                               size = 11,
+                               face = 'bold'),
+    plot.margin = margin(b = 30),
+    axis.line.y = element_line(),
+    axis.ticks.y = element_line()
+  )
+   
+girafe(ggobj = Q8_plot,        
+       options = list(          
+         opts_hover_inv(css = "opacity:0.7;"),          
+         opts_hover(css = "stroke-width:1.2;stroke:black;"),          
+         opts_tooltip(css = tooltip_css        
+         )
+       )
+) 
+```
+
+The polls were highly inaccurate for Mas Pais, which is consistent with the fact that the party was new at the moment of the elections. We can imagine that people were either, no aware enough of the program of the party or not sure enough (or both) that they will vote for Mas Pais, making it hard to predict with accuracy its result.
+
+The higher inaccuracy in the polls of the election of November 2019 is also striking. Surprisingly enough, the predictions for PP in the elections of April are the only one to be less accurate in April than in November.
+
+## Question 9 : Which polling houses got it right the most and which ones deviated the most from the results? {visibility="hidden"}
+
+```{r}
+
+Q9 <-
+  error_survey |> 
+  select(date_elec,
+         id_pollster, 
+         pollster,
+         media, 
+         party_acronym, 
+         relative_error_poll) |> 
+  ungroup()
+
+Q9_1 <- 
+  Q9 |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec, id_pollster, pollster) |> 
+  summarise(median_error = median(relative_error_poll)) |> 
+  ungroup(id_pollster, pollster) |> 
+  mutate(ranking = rank(median_error)) |> 
+  ungroup()
+
+
+  # Answer for the second election
+polling_houses_Apr <- 
+  Q9_1 |>
+  filter(date_elec < "2019-05-01") |> 
+  filter(ranking <=3 | ranking > 11) |> 
+  select(-id_pollster, -date_elec) |> 
+  arrange(median_error)
+
+polling_houses_Nov <- 
+  Q9_1 |>
+  filter(date_elec > "2019-05-01") |> 
+  filter(ranking <=3 | ranking > 15) |> 
+  select(-id_pollster, -date_elec) |> 
+  arrange(median_error)
+```
+
+This is a little check in order to confirm that the huge outliers that we talked about previously were not errors on our part. According to it, it seems that it is not.
+
+```{r}
+# number of votes for PNV in April 2019
+check <- 
+  election_data_clean |> 
+  filter(party_acronym == "PNV") |> 
+  filter(date > "2019-05-01") |>
+  summarise(number_votes_pnv = sum(votos))
+
+# total number of votes in April 2019
+checkkk <- 
+  election_data_clean18 |>
+  ungroup() |>
+  filter(date > "2019-05-01") |>
+  distinct(cod_mun, .keep_all = TRUE)|>
+  group_by(date)|>
+  summarise(total_votes = sum(votos_blancos + votos_nulos + votos_candidaturas))
+
+checkkkkk <- 
+  (check$number_votes_pnv/checkkk$total_votes)*100
+
+```
+
+The written project stops here. Here start the slides, which are a lot more chaotic.
+
+# The presentation {visibility="hidden"}
+
+# Style Classes
+
+```{css, echo=FALSE}
+.custom-h1 {
+  font-size: 50%;
+}
+```
+
+```{css, echo=FALSE}
+.custom-h2 {
+  font-size: 70%;
+}
+```
+
+```{css, echo=FALSE}
+.custom-h3 {
+  font-size: 70%;
+}
+```
+
+```{css, echo=FALSE}
+.bigger {
+  font-size: 120%;
+}
+```
+
+```{css, echo=FALSE}
+.math {
+    color: white;
+    font-family: 'Poppins', sans-serif;
+}
+```
+
+```{css, echo=FALSE}
+.wrap1 {
+   max-height: 100px; 
+    overflow-y: auto;;
+}
+```
+
+```{css, echo=FALSE}
+.wrap2 {
+   max-height: 150px; 
+    overflow-y: auto;;
+}
+```
+
+```{css, echo=FALSE}
+.wrap3 {
+   max-height: 200px; 
+    overflow-y: auto;;
+}
+```
+
+```{css, echo=FALSE}
+.wrap4 {
+   max-height: 80px; 
+    overflow-y: auto;;
+}
+```
+
+```{css, echo=FALSE}
+.wrap5 {
+   max-height: 300px; 
+    overflow-y: auto;;
+}
+```
+
+```{css, echo=FALSE}
+.output {
+   max-height: 200px; 
+    overflow-y: auto;;
+}
+```
+
+```{css, echo=FALSE}
+.col_space{
+padding-right: 11%;
+}
+```
+
+# Data Programming Final Project
+
+Laura Martinez\
+Sara Cristina Herranz Amado\
+Daniel Pérez Gutiérrez\
+Carlos San Juan Baeza\
+Mathieu Bietrix
+
+# Q1 {.custom-h1} {visibility="hidden"}
+
+# National vs regional parties {.custom-h1}
+
+::: columns
+::: {.column width="50%" style="font-size: 100%;"}
+::: fragment
+**Step 1** - We classify all our parties into either national or regionalist.
+
+```{r eval=FALSE, echo=TRUE}
+#classification
+national_parties <- c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")
+
+regional_parties <- election_data_clean |> 
+  filter(!(party_acronym %in% national_parties) & party_acronym != "OTHERS") |> 
+  pull(party_acronym)
+```
+:::
+
+::: fragment
+**Step 2** - We calculate the percentage votes for each combination of party_type and date
+
+```{r eval=FALSE, echo=TRUE}
+#pcg votes
+Q1 <- election_data_clean |> 
+  group_by(party_type = if_else(party_acronym %in% national_parties, "National",
+                                if_else(party_acronym %in% regional_parties, "Regional",
+                                        "OTHERS")), date) |>
+  filter(party_type %in% c("National", "Regional")) |> 
+  summarise(total_votes = sum(votos)) |> 
+  group_by(date) |> 
+  mutate(ptg_votes = round((total_votes / sum(total_votes)) * 100, 2)) |> 
+  ungroup() |> 
+  arrange(date)
+```
+:::
+:::
+
+::: {.column width="50%" style="font-size: 100%;"}
+::: fragment
+The results show that national parties have a considerable advantage in comparison to regional ones.
+
+```{r eval=TRUE, class.source='wrap4', echo=TRUE}
+Q1
+```
+:::
+:::
+:::
+
+# Enhacement 1 {.custom-h1}
+
+## Plotting how national and regional parties are distributed {.custom-h2}
+
+Specifically, it plots the percentage of each party type for each election.
+
+::: columns
+::: {.column width="50%" style="font-size: 100%;"}
+::: fragment
+**Step 1** - Create a new variable with the dates.
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+
+Q1 <- Q1 |> 
+  mutate(facetdate = case_when(date == "2008-03-01" ~ "2008",
+                               date == "2011-11-01" ~ "2011",
+                               date == "2015-12-01" ~ "2015",
+                               date == "2016-06-01" ~ "2016",
+                               date == "2019-04-01" ~ "April 2019",
+                               date == "2019-11-01" ~ "November 2019"), 
+         .before = date) 
+```
+:::
+:::
+
+::: {.column width="50%" style="font-size: 100%;"}
+::: fragment
+**Step 2** - Set the Text fonts
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+sysfonts::font_add_google("Fira Sans Condensed", family = "sans-serif")
+sysfonts::font_add_google("Fira Sans", family = "sans-serif")
+showtext::showtext_auto()
+
+font_add_google("Fira Sans Condensed")
+font_add_google("Fira Sans")
+```
+:::
+:::
+:::
+
+::: fragment
+Now we create the map to visually see the differences between these two types of parties
+
+```{r eval=TRUE, class.source='wrap1', echo=TRUE}
+Q1_plot <- ggplot(data = Q1) +
+  aes(x = party_type, y = ptg_votes, fill = party_type) +
+  geom_bar(stat = "identity", alpha = 0.7) + 
+  geom_text(aes(x = party_type, y = ptg_votes, label = scales::percent(ptg_votes/100, 1)),
+            position = position_dodge(width = 1),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("#D82327", "#2150c6"), guide = FALSE) +
+  labs(title = "Distribution of votes: national vs. regional parties \n",
+       x = NULL,
+       y =  NULL) +
+  scale_y_continuous(labels = scales::comma_format(), 
+                     expand = expansion(mult = c(0, .1)),
+                     breaks = seq(from = 20, to = 100, by = 40)) +
+  facet_wrap(~facetdate, scales = "free_x", ncol = 2) +
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.spacing.y = unit(2.5, "lines"),
+        legend.position = "none",
+        plot.title = element_text(family = "Fira Sans Condensed", 
+                                  size = 25, 
+                                  face = "bold"),
+        axis.text.x = element_text(family = "Fira Sans Condensed",
+                                   size = 20), 
+        axis.text.y = element_text(family = "Fira Sans Condensed",
+                                   size = 20),
+        axis.title = element_text(family = "Fira Sans Condensed",
+                                  size = 20), 
+        strip.text = element_text(face = "bold", size = 10))
+
+```
+:::
+
+# Graph {.custom-h1}
+
+::: fragment
+```{r eval=TRUE, class.source='output1', echo=TRUE}
+Q1_plot
+```
+:::
+
+# Enhacement 2 {.custom-h1}
+
+## Data preparation I {.custom-h2}
+
+::: fragment
+**Step 1** - We need to load our shapefile and merge it to our dataset
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+mun_shp <- read_sf("georef-spain-municipio-millesime.shp")
+
+#modificate the column names to have a common key
+mun_shp <- mun_shp |> 
+  select(mun_code, geometry) |> 
+  unique()
+
+mun_shp <- mun_shp %>%
+  rename(cod_mun = mun_code)
+
+map_data <- election_data_clean|> 
+  select(-cod_mun) |> 
+  mutate(cod_mun = glue("{codigo_provincia}{codigo_municipio}")) |> 
+  relocate(cod_mun, .before = municipio)
+
+#eliminate irrelevant variables
+map_data <- map_data |> 
+  select(-codigo_ccaa, -codigo_provincia, -codigo_municipio, 
+         -numero_mesas, -participacion_1, -participacion_2)
+
+#merging by the common key
+map_data <- left_join(mun_shp, map_data, by = "cod_mun")
+```
+:::
+
+::: fragment
+::: {.callout-tip style="max-width: 20px"}
+For merging shapefiles to our data we want to ensure to keep only the necessary columns to merge then to our dataset (in this case only the geometry and an identifyer key).
+:::
+:::
+
+::: fragment
+**Step 2** Create the categories for the two party types we are interested in
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE, }
+
+national_parties <- c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")
+
+regional_parties <- election_data_clean |> 
+  filter(!(party_acronym %in% national_parties) | party_acronym == "OTHERS") |> 
+  pull(party_acronym) #we include all those that are not national to sum up to 100%
+
+map_data <- map_data |> 
+  mutate(party_type = ifelse(party_acronym %in% national_parties, "National", "Regional")) |> 
+  select(-party_acronym)
+```
+:::
+
+::: fragment
+**Step 3** Compute the average percentage of votes of each party
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+map_data <- map_data |> 
+  group_by(date, cod_mun, party_type) |> 
+  mutate(ttl_votos = sum(votes), 
+         pcg_partyvotes = round(ttl_votos / (votos_nulos + votos_blancos + votos_candidaturas) * 100, 2)) |> 
+  ungroup()
+
+map_data <- map_data |> 
+  select(-censo, -votos_blancos, -votos_nulos, 
+         -votos_candidaturas, -votes, -ttl_votos) |> 
+  unique() #and eliminate useless variables afterwards
+```
+:::
+
+## Data preparation II {.custom-h2}
+
+::: fragment
+**Step 4** Compute the average percentage of votes of each party
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+map_data <- map_data |> 
+  group_by(date, cod_mun, party_type) |> 
+  mutate(ttl_votos = sum(votes), 
+         pcg_partyvotes = round(ttl_votos / (votos_nulos + votos_blancos + votos_candidaturas) * 100, 2)) |> 
+  ungroup()
+
+map_data <- map_data |> 
+  select(-censo, -votos_blancos, -votos_nulos, 
+         -votos_candidaturas, -votes, -ttl_votos) |> 
+  unique() #and eliminate useless variables afterwards
+```
+:::
+
+::: fragment
+**Step 5** Restructure our data to make a winner column
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+map_data <- map_data |> 
+  spread(key = party_type, value = pcg_partyvotes) |> 
+  mutate_all(~replace(., is.na(.), 0)) 
+
+map_data <- mutate(map_data, winner = if_else(National > Regional, "National", "Regional"))
+```
+:::
+
+::: fragment
+**Step 6** Divide our dataset by date
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+map_data_2008 <- map_data |> 
+  filter(date == "2008-03-01")
+
+map_data_2011 <- map_data |> 
+  filter(date == "2011-11-01")
+
+map_data_2015 <- map_data |> 
+  filter(date == "2015-12-01")
+
+map_data_2016 <- map_data |> 
+  filter(date == "2016-06-01")
+
+map_data_apr <- map_data |> 
+  filter(date == "2019-04-01")
+
+map_data_nov <- map_data |> 
+  filter(date == "2019-04-01")
+
+```
+:::
+
+::: fragment
+::: callout-warning
+We are going to create many maps (one for each date) to compare them side by side, so although it looks messy we need to keep all the dataframes and variables clearly identified.
+:::
+:::
+
+## Creation of pop-up labels {.custom-h2}
+
+::: fragment
+::: columns
+::: {.column width="50%" style="font-size: 60%;"}
+**Step 1** - Create a pop-up with the margins of victory of each party first we need to find the minimum and maximum values of eact of the party types
+
+```{css, echo=FALSE}
+.wrap3 {
+   max-height: 250px; 
+    overflow-y: auto;;
+}
+```
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+
+#map1(2008)
+map_data_2008 <- mutate(map_data_2008, margin = abs(National - Regional))
+min_max_values1 <- range(map_data_2008$margin, na.rm = TRUE)
+
+#map2(2011)
+map_data_2011 <- mutate(map_data_2011, margin = abs(National - Regional))
+min_max_values2 <- range(map_data_2011$margin, na.rm = TRUE)
+
+#map3(2015)
+map_data_2015 <- mutate(map_data_2015, margin = abs(National - Regional))
+min_max_values3 <- range(map_data_2015$margin, na.rm = TRUE)
+
+#map4(2016)
+map_data_2016 <- mutate(map_data_2016, margin = abs(National - Regional))
+min_max_values4 <- range(map_data_2016$margin, na.rm = TRUE)
+
+#map5(apr_19)
+map_data_apr <- mutate(map_data_apr, margin = abs(National - Regional))
+min_max_values5 <- range(map_data_apr$margin, na.rm = TRUE)
+
+#map6(nov_19)
+map_data_nov <- mutate(map_data_nov, margin = abs(National - Regional))
+min_max_values6 <- range(map_data_nov$margin, na.rm = TRUE)
+
+```
+
+**Step 3** - Create two different data frames for each type of party
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+#2008
+regional_df1 <- map_data_2008[map_data_2008$winner == "Regional",]
+national_df1 <- map_data_2008[map_data_2008$winner == "National",]
+#2011
+regional_df2 <- map_data_2011[map_data_2011$winner == "Regional",]
+national_df2 <- map_data_2011[map_data_2011$winner == "National",]
+#2015
+regional_df3 <- map_data_2015[map_data_2015$winner == "Regional",]
+national_df3 <- map_data_2015[map_data_2015$winner == "National",]
+#2016
+regional_df4 <- map_data_2016[map_data_2016$winner == "Regional",]
+national_df4 <- map_data_2016[map_data_2016$winner == "National",]
+#apr 2019
+regional_df5 <- map_data_apr[map_data_apr$winner == "Regional",]
+national_df5 <- map_data_apr[map_data_apr$winner == "National",]
+#nov 2019
+regional_df6 <- map_data_nov[map_data_nov$winner == "Regional",]
+national_df6 <- map_data_nov[map_data_nov$winner == "National",]
+
+```
+:::
+
+::: {.column width="50%" style="font-size: 60%;"}
+**Step 2** - Create a colour palette taking the smallest number of the margin between votes for the lightest colour and the biggest for the darkest.
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+
+#map1
+regional_palette1 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values1[1], min_max_values1[2]))
+national_palette1 <- colorNumeric(palette = "Blues", 
+                               domain=c(min_max_values1[1], min_max_values1[[2]]))
+
+#map2
+regional_palette2 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values2[1], min_max_values2[2]))
+national_palette2 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values2[1], min_max_values2[[2]]))
+
+#map3
+regional_palette3 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values3[1], min_max_values3[2]))
+national_palette3 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values3[1], min_max_values3[[2]]))
+#map4
+regional_palette4 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values4[1], min_max_values4[2]))
+national_palette4 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values4[1], min_max_values4[[2]]))
+
+#map5
+regional_palette5 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values5[1], min_max_values5[2]))
+national_palette5 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values5[1], min_max_values5[[2]]))
+
+#map6
+regional_palette6 <- colorNumeric(palette = "Reds", 
+                                  domain=c(min_max_values6[1], min_max_values6[2]))
+national_palette6 <- colorNumeric(palette = "Blues", 
+                                  domain=c(min_max_values6[1], min_max_values6[[2]]))
+
+
+```
+
+**Step 4** - Customise the pop-ups for each map
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+#map1
+national_popup1 <- glue("<strong>{national_df1$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df1$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df1$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df1$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup1 <- glue("<strong>{regional_df1$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df1$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df1$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df1$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map2
+national_popup2 <- glue("<strong>{national_df2$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df2$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df2$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df2$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup2 <- glue("<strong>{regional_df2$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df2$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df2$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df2$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map3
+national_popup3 <- glue("<strong>{national_df3$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df3$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df3$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df3$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup3 <- glue("<strong>{regional_df3$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df3$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df3$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df3$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map4
+national_popup4 <- glue("<strong>{national_df4$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df4$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df4$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df4$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup4 <- glue("<strong>{regional_df4$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df4$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df4$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df4$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map5
+national_popup5 <- glue("<strong>{national_df5$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df5$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df5$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df5$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup5 <- glue("<strong>{regional_df5$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df5$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df5$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df5$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+#map6
+national_popup6 <- glue("<strong>{national_df6$municipio} AREA</strong><br />
+                    <strong>Winner: National</strong><br />
+                    National: {scales::comma(national_df6$National, accuracy = 1)}<br />
+                    Regional: {scales::comma(national_df6$Regional, accuracy = 1)}<br />
+                    Margin: {scales::comma(national_df6$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+regional_popup6 <- glue("<strong>{regional_df6$municipio} AREA</strong><br />
+                      <strong>Winner: Regional</strong><br />
+                      Regional: {scales::comma(regional_df6$Regional, accuracy = 1)}<br />
+                      National: {scales::comma(regional_df6$National, accuracy = 1)}<br />
+                      Margin: {scales::comma(regional_df6$margin, accuracy = 1)}")  |>    
+  lapply(htmltools::HTML)
+
+```
+:::
+:::
+:::
+
+::: fragment
+::: {.fragment style="font-size: 20px;"}
+**Final step** - Overlay the data over a base map and plot each of our maps with **mapview()** At the same time we save the maps for displaying them later jointly.
+
+```{r eval=FALSE, class.source='wrap4', echo=TRUE}
+library(mapview) #required library for this map
+
+#map 1
+m1 <- mapview(
+  national_df1,
+  col.regions = national_palette1(national_df1$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup1,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df1,
+    col.regions = regional_palette1(regional_df1$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup1,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 2
+m2 <-mapview(
+  national_df2,
+  col.regions = national_palette2(national_df2$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup2,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df2,
+    col.regions = regional_palette2(regional_df2$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup2,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 3
+m3 <-mapview(
+  national_df3,
+  col.regions = national_palette3(national_df3$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup3,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df3,
+    col.regions = regional_palette3(regional_df3$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup3,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 4
+m4 <-mapview(
+  national_df4,
+  col.regions = national_palette4(national_df4$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup4,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df4,
+    col.regions = regional_palette4(regional_df4$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup4,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 5
+m5 <-mapview(
+  national_df5,
+  col.regions = national_palette5(national_df5$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup5,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df5,
+    col.regions = regional_palette5(regional_df5$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup5,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+#map 5
+m6 <-mapview(
+  national_df6,
+  col.regions = national_palette6(national_df6$margin),
+  lwd = 1,
+  legend = FALSE,
+  alpha.regions = 0.7,
+  zcol = "margin",
+  cex = 0.8,
+  labels = national_popup6,
+  main = "National Map", 
+  map.types = "CartoDB.Positron"
+) +
+  mapview(
+    regional_df5,
+    col.regions = regional_palette6(regional_df6$margin),
+    lwd = 1,
+    legend = FALSE,
+    alpha.regions = 0.7,
+    zcol = "margin",
+    cex = 0.8,
+    labels = regional_popup6,
+    main = "Regional Map", 
+    map.types = "CartoDB.Positron"
+  )
+
+```
+:::
+:::
+
+## Final : {.custom-h2}
+
+### Joint plot1 {.custom-h3}
+
+```{css, echo=FALSE}
+.output {
+   max-height: 500px; 
+    overflow-y: auto;;
+}
+```
+
+```{r eval=FALSE, class.source='output', echo=TRUE}
+ m1 | m2
+
+```
+
+## Final : {.custom-h2}
+
+### Joint plot2 {.custom-h3}
+
+```{r eval=FALSE, class.source='output', echo=TRUE}
+ m2 | m3
+
+```
+
+## Final : {.custom-h2}
+
+### Joint plot3 {.custom-h3}
+
+```{r eval=FALSE, class.source='output', echo=TRUE}
+ m3 | m4
+
+```
+
+## Final : {.custom-h2}
+
+### Joint plot4 {.custom-h3}
+
+```{r eval=FALSE, class.source='output', echo=TRUE}
+ m4 | m5
+
+```
+
+## Final : {.custom-h2}
+
+### Joint plot5 {.custom-h3}
+
+```{r eval=FALSE, class.source='output', echo=TRUE}
+ m5 | m6
+
+```
+
+# Q2 {.custom-h1} {visibility="hidden"}
+
+# Which party wins in municipalities with more than 100.000 inhabitants? {.custom-h1}
+
+::: fragment
+-   Code
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+
+Q2 <- election_data_clean |> 
+  filter(censo > 100000) |> 
+  group_by(date, municipio) |> 
+  slice(which.max(votos)) |> 
+  select(date, municipio, party_acronym, votos) |> 
+  arrange(municipio) |> 
+  ungroup() 
+```
+:::
+
+::: fragment
+-   The winner in each municipality were...
+
+```{r eval= TRUE, class.source='wrap2', echo = FALSE }
+
+Q2
+```
+:::
+
+# Q3 {.custom-h1} {visibility="hidden"}
+
+# The Eternal Second {.custom-h1}
+
+## A ranking is needed {.custom-h2}
+
+``` {.r code-line-numbers="3,4,9" class.source="wrap1"}
+
+# Creating a ranking for each election 
+election_data |> 
+  group_by(date, party_acronym) |>
+  mutate(sum_votes = sum(votos)) |> 
+  distinct(date, party_acronym, .keep_all = TRUE) |> 
+  select(date, party_acronym, sum_votes) |>
+  ungroup(party_acronym) |> 
+  filter(party_acronym != "OTHERS") |> 
+  mutate(rank = rank(-sum_votes)) |> 
+  arrange(date, rank)
+```
+
+::: fragment
+```{r eval=TRUE, class.output='output', echo=TRUE}
+
+# Output
+Q3
+
+```
+:::
+
+## No function, no problem {.custom-h2}
+
+```{r eval=FALSE, echo=TRUE}
+
+rank_second <- function(dataset, party){
+  
+# Part 1
+  winning_election <-
+    dataset |> 
+    filter(rank == 1, party_acronym == party) |>
+    select(date) |> 
+    as_vector()
+  
+# Part 2
+  party_ranked_second <-
+    dataset |> 
+    mutate(date = as.numeric(date)) |> 
+    filter(date %in% winning_election &
+             rank == 2) |> 
+    mutate(date = as_date(date))
+
+# Here we have our second
+    return(party_ranked_second)
+}
+
+```
+
+## 🤓 How does it work ? {.custom-h2}
+
+**Part** 1️⃣ We create a vector (`winning_election`) that contains the dates of elections in which `party` was the winner
+
+**Part** 2️⃣ Filter the `dataset` to keep only the records of the election that are in `winning_election`, and with `rank` == 2
+
+**Part** 3️⃣ Return the vector with the 2nd party
+
+::: fragment
+```{r eval=TRUE, echo=TRUE}
+
+second_party_pp
+second_party_psoe
+```
+:::
+
+# Q4 {.custom-h1} {visibility="hidden"}
+
+# If nobody votes, who wins? - Analysis of the relation between turnout and vote? {.custom-h1}
+
+::: fragment
+-   Filter the data for the following period: 2018-2019
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+election_data_clean18 <- election_data_clean |> 
+  filter(date %in% c("2019-04-01", "2019-11-01")) |> 
+  mutate(date = case_when(date == "2019-04-01" ~ ymd("2019-04-28"),
+                          date == "2019-11-01" ~ ymd("2019-11-10")))
+```
+:::
+
+::: fragment
+**First Step** - create a *participation rate variable*
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+election_data_clean18 <- election_data_clean18 |> 
+  group_by(date) |> 
+  mutate(participation_rate = mean((votos_candidaturas + votos_nulos + votos_blancos)/censo), .before = party_acronym)
+```
+:::
+
+::: fragment
+**Second Step** - Grouping and means
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+
+Q4 <- election_data_clean18 |> 
+  group_by(date, party_acronym) |> 
+  mutate(avg_votes = (mean(votos) / mean(votos_candidaturas + votos_nulos + votos_blancos))) |>
+  ungroup() |> 
+  distinct(date, party_acronym, .keep_all = TRUE) 
+
+
+# Select only the necessary columns
+Q4 <- Q4|> 
+  select(
+    date,
+    party_acronym,
+    participation_rate,
+    avg_votes) |> 
+  group_by(date) |> 
+  arrange(desc(avg_votes)) |> 
+  ungroup() 
+```
+:::
+
+::: fragment
+**Third Step** - Reestructurate the columns
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+Q4 <- Q4 |> 
+  pivot_wider(
+    id_cols = party_acronym,
+    names_from = date,
+    values_from = c(participation_rate, avg_votes)) 
+
+```
+:::
+
+## Results {.custom-h2}
+
+::: fragment
+-   Code:
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+answer <- Q4 |> 
+  mutate(
+    diff_participation_rate = (`participation_rate_2019-11-10` - `participation_rate_2019-04-28`),
+    diff_avg_votes = (`avg_votes_2019-11-10` - `avg_votes_2019-04-28`)) |> 
+   select(party_acronym, diff_participation_rate, diff_avg_votes) |> 
+   arrange(desc(diff_avg_votes))
+```
+
+```{r eval=TRUE, class.source='wrap2', echo=TRUE}
+
+answer
+```
+:::
+
+::: fragment
+Is there a way to make it less confusing? I have an idea...
+:::
+
+## Graph {.custom-h2}
+
+```{r eval=TRUE, echo=TRUE}
+
+Q4_plot
+```
+
+This agrees with reality? ⬇️ Paricipation = ⬆️ Right Parties
+
+# Q5 {.custom-h1} {visibility="hidden"}
+
+# Relationship between census and vote? Is it true that certain parties win in rural areas? {.custom-h1}
+
+::: fragment
+-   What Spanish Law say?
+:::
+
+::: fragment
+Rural areas = "Population" \<30k & "Population density" \< 100 "inhabitants" / km\^2
+:::
+
+::: fragment
+-   **First Step** - Grouping and get the participation
+
+```{r eval=FALSE, echo=TRUE}
+Q5  <- election_data_clean |> 
+  group_by(date, municipio) |> 
+  summarise(participation_rate = mean((votos_candidaturas + votos_nulos + votos_blancos) / censo, 
+                                      .before = party_acronym),
+            censo = first(censo),
+            censo_log = log(censo)) |> 
+  ungroup() |> 
+  arrange(date, desc(censo))
+```
+:::
+
+::: fragment
+**Second Step** - Correlations between censo and participation
+
+```{r eval=TRUE, class.source='wrap1', echo=TRUE}
+# Correlation between census and participation rate
+cor5 <- Q5 |> 
+  with(cor(censo_log, participation_rate))
+
+cor5
+```
+:::
+
+::: fragment
+-   Negative and Weak Correlation. What means?
+:::
+
+## Regressions and results {.custom-h2}
+
+::: fragment
+-   Why? Correlation ≠ Causality
+:::
+
+::: fragment
+```{r eval=TRUE, echo=TRUE}
+
+Q5_reg <- Q5 |> 
+  mutate(participation_rate_log = log(participation_rate)) |> 
+  select(participation_rate_log, censo_log) 
+
+regression_q5 <- lm(participation_rate_log ~ censo_log, data = Q5_reg)
+
+summary(regression_q5)
+
+```
+:::
+
+## ANOVA {.custom-h2}
+
+::: fragment
+**First Steps** - Make Ratio_cv
+:::
+
+::: fragment
+```{r eval=FALSE, echo=TRUE}
+Q5a <- election_data_clean |> 
+  mutate(mun_type = case_when(censo < 30000 ~ "rural",
+                              TRUE ~ "urban"), .after = municipio)  |> 
+  group_by(date, mun_type, party_acronym) |> 
+  summarise(ratio_cv = round(mean(votos / censo), 2)) |> 
+  ungroup() |> 
+  arrange(date, mun_type, desc(ratio_cv))
+```
+:::
+
+::: fragment
+**Second Step** - Make an Anova to see the interaction of mun_type and party_acromym
+:::
+
+::: fragment
+```{r eval=TRUE, class.source='wrap2', echo=TRUE}
+result_anova <- aov(ratio_cv ~ mun_type * party_acronym, data = Q5a)
+
+# Display ANOVA summary
+anova <- summary(result_anova)
+anova
+```
+:::
+
+## Boxplots {.custom-h2}
+
+::: fragment
+-   What is the objective?
+
+```{r eval=TRUE, echo=FALSE}
+# Tukey analysis
+tukey <- TukeyHSD(aov(result_anova))
+
+Q5bp <- ggboxplot(Q5a, x = "party_acronym", y = "ratio_cv", color = "mun_type",
+          palette = c("#00AFBB", "#E7B800"),
+          ylab = FALSE, xlab = FALSE,
+          title = "Ratio votes/census by municipality type and party",
+          font.label = )
+
+Q5bp
+```
+:::
+
+::: fragment
+-   Does it make sense?
+:::
+
+# Q6 {.custom-h1} {visibility="hidden"}
+
+# Can we reduce the error of the poll? {.custom-h1}
+
+**Hypothesis**: To increase the precision of the polls, you need to increase their `size` (number of people interviewed).
+
+## **Step 1** - Clean the survey data and add `party_acronym` {.custom-h2}
+
+```{r eval=FALSE, class.source='wrap1', echo=TRUE}
+
+surveys_clean |> 
+  mutate(party_acronym = case_when(
+    
+    str_detect(abrev, "PSOE") ~ "PSOE",
+    
+    str_detect(abrev, "PP") ~ "PP", 
+    
+    str_detect(abrev, "CS") ~ "CS",
+    
+    str_detect(abrev, "EAJ-PNV") ~ "PNV",
+    
+    str_detect(abrev, "BNG") ~ "BNG",
+    
+    str_detect(abrev, "COMPROMIS") ~ "COMPROMÍS 2",
+    
+    str_detect(abrev, "CIU") ~ "CIU",
+    
+    str_detect(abrev, "IU") |
+    str_detect(abrev, "PODEMOS") |
+    str_detect(abrev, "UP") ~ "UP",
+    
+    str_detect(abrev, "ERC") ~ "ERC",
+    
+    str_detect(abrev, "EA") |
+    str_detect(abrev, "EH") |
+    str_detect(abrev, "EH-BILDU") ~ "BILDU",
+    
+    str_detect(abrev, "VOX") ~ "VOX",
+    
+    str_detect(abrev, "MP") ~ "MÁS PAÍS",
+    
+    TRUE ~ "OTHERS"
+  ))|> 
+  relocate(party_acronym, .before = votes_intentions) |> 
+  select(-abrev)
+```
+
+Clear nicknames out there !
+
+```{r eval=TRUE, class.output='output', echo=FALSE}
+
+Q6 |> 
+  select(-field_date_from, -field_date_to, -id_pollster, -turnout, -fieldworkcount)
+
+```
+
+## **Step 2** - Compute the **% of vote** for each party, in each election {.custom-h2}
+
+$$ 
+\text{percentage of votes} = \frac{{\text{sum of party votes}}}{{\text{total votes in election}}} \%
+$$
+
+```{r eval=FALSE, echo=TRUE}
+
+#  Votes received by each party in each election
+election_data |> 
+  group_by(date, party_acronym) |> 
+  summarise(sum_votes = sum(votos))
+
+# Total number of votes at a national scale in each election 
+election_data |> 
+  distinct(date, cod_mun, .keep_all = TRUE) |>  
+  group_by(date) |> 
+  summarise(total = sum(votos_blancos + votos_nulos + votos_candidaturas))
+
+# Calculation of the vote %
+joint_of_both_previous |> 
+  mutate(percentage_votes = (sum_votes/total)*100)
+```
+
+## **Step 3** - Compute the **% of vote intentions** for each party, in each election {.custom-h2}
+
+$$
+\text{mean(vote intentions in the election)}
+$$
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+
+# Calculation of the votes intentions registered by each media for each part, each election
+survey_cleandata |> 
+  group_by(date_elec, media, party_acronym) |> 
+  mutate(mean_votes_intentions = mean(votes_intentions, na.rm = TRUE)) |> 
+  distinct(media, .keep_all = TRUE)
+
+```
+
+## **Final Step** - Create a new data set, showcasing both variables {.custom-h2}
+
+$$
+\text{relative error = }\left| \frac{{(\text{ % of votes} - \text{mean of vote intentions})}}{{\text{%  of votes}}}\right| \times 100 
+$$
+
+```{r eval=FALSE, echo=TRUE}
+
+# Join votes intentions table with votes percentages tables, 
+# in order to compare both variable.
+vote_intentions |> 
+  left_join(percentage_votes,
+            by = c('date_elec' = 'date',
+                   'party_acronym'= 'party_acronym')) |> 
+  
+    # Calculation of the relative error
+    mutate(relative_error = 
+             abs(((percentage_votes-mean_votes_intentions)/percentage_votes)*100)) |> 
+    filter(relative_error < 100)
+
+```
+
+# Does the size really have an influence on the error? {.custom-h1}
+
+::: panel-tabset
+## Correlation {.custom-h1}
+
+```{r eval=FALSE, echo=TRUE}
+
+# Computation of the correlation coefficient
+correlation <- 
+  error_survey |> 
+  drop_na(relative_error) |> 
+  with(cor(relative_error, size))
+```
+
+```{r eval=TRUE, echo=TRUE}
+
+correlation
+```
+
+## Regression {.custom-h1}
+
+```{r eval=FALSE, echo=TRUE}
+  
+# Performing a regression analysis
+error_survey |> 
+  mutate(log_size = log(size)) |> 
+  mutate (log_relative_error = log(relative_error))
+
+regression <- 
+  lm(log_relative_error ~ log_size, 
+     data= error_survey)
+```
+
+```{r eval=TRUE, echo=TRUE}
+
+summary(regression_q6)
+```
+:::
+
+::: incremental
+-   **Negative**, but very **slight** correlation
+
+-   When `size` ↗️, `relative_error` ↘️
+
+-   ✅ Hypothesis
+
+-   ⚠️ However: no **statistical significance**
+:::
+
+# Q7 {.custom-h1} {visibility="hidden"}
+
+# When polls get wrong {.custom-h1}
+
+::: fragment
+-   **Step 1** - First, let's create a new relevant database
+
+```{r eval=FALSE, class.source='wrap3', echo=TRUE}
+error_survey <-
+  error_survey |> 
+  select(date_elec,id_pollster, pollster,media, relative_error_poll) |> 
+  ungroup()
+```
+:::
+
+::: fragment
+-   **Step 2** - In each election, we calculate the relative error of the polls
+
+```{r eval= FALSE, class.source='wrap3', echo=TRUE}
+
+error_survey |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec) |> 
+  summarise(mean_error = mean(relative_error_poll))
+
+```
+:::
+
+::: fragment
+-   In November, the polls got quite wrong
+
+```{r eval=TRUE, class.source='wrap3', echo=FALSE}
+
+Q7_1
+
+```
+:::
+
+## Mean, or median? {.custom-h2}
+
+-   Alternative 1: Switching to the median
+
+```{r eval=FALSE, class.source='wrap3', echo=TRUE}
+#|code-line-numbers: "6,12"
+
+Q7_enhancement1 |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec) |> 
+  summarise(median_error = median(relative_error_poll))
+```
+
+\
+
+```{r eval=TRUE, class.output='output', echo=TRUE}
+
+Q7_1_enhancement1
+```
+
+## Relative or absolute? {.custom-h2} {visibility="hidden"}
+
+-   Alternative 2: Not taking the absolute value when computing the error
+
+```{r eval=FALSE, class.source='wrap4', echo=TRUE}
+#| code-line-numbers: "3,4"
+
+error_survey_enhancement2 <- 
+  Q6_7 |> 
+    mutate(relative_error_poll = 
+             ((percentage_votes-mean_votes_intentions )/percentage_votes)*100) |> 
+    filter(relative_error_poll < 100)
+```
+
+\
+
+```{r eval=TRUE, class.output='output', echo=TRUE}
+
+Q7_1_enhancement2
+
+```
+
+# Q8 {.custom-h1} {visibility="hidden"}
+
+# How were the polls wrong in national parties? {.custom-h1}
+
+The computation doesn't change much, but this time we have to filter the data and compute the average relative error per party.
+
+```{r eval=FALSE, echo=TRUE}
+#| code-line-numbers: "3,5,6"
+
+Q8_1 <- 
+  error_survey |> 
+  filter(party_acronym %in% c("PSOE", "PP", "VOX", "CS", "MÁS PAÍS", "UP")) |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec, party_acronym) |> 
+  summarise(mean_error = mean(relative_error_poll)) |> 
+  ungroup()
+
+```
+
+```{r eval=TRUE, class.output='output', echo=TRUE}
+
+Q8_1
+
+```
+
+## Graph {.custom-h2}
+
+```{r eval=TRUE, echo=FALSE}
+
+
+girafe(ggobj = Q8_plot,        
+       options = list(          
+         opts_hover_inv(css = "opacity:0.7;"),          
+         opts_hover(css = "stroke-width:1.2;stroke:black;"),          
+         opts_tooltip(css = tooltip_css        
+         )
+       )
+) 
+
+```
+
+# Q9 {.custom-h1} {visibility="hidden"}
+
+# Good students, bad students {.custom-h1}
+
+::: fragment
+-   **Step 1** - New Dataset with the important variables {.custom-h3}
+
+```{r eval=FALSE, class.source='wrap2', echo=TRUE}
+Q9 <-
+  error_survey |> 
+  select(date_elec,
+         id_pollster, 
+         pollster,
+         media, 
+         party_acronym, 
+         relative_error_poll) |> 
+  ungroup()
+```
+:::
+
+::: fragment
+-   **Step 2** - Making a Ranking {.custom-h3}
+
+```{r eval=FALSE, echo=TRUE, }
+Q9_1 <- 
+  Q9 |> 
+  drop_na(relative_error_poll) |> 
+  group_by(date_elec, id_pollster, pollster) |> 
+  summarise(median_error = median(relative_error_poll)) |> 
+  ungroup(id_pollster, pollster) |> 
+  mutate(ranking = rank(median_error)) |> 
+  ungroup()
+```
+:::
+
+## Top 3 Best and Worst Pollster {.custom-h3}
+
+::: fragment
+**April's Elections**
+
+```{r eval=TRUE, echo=TRUE, }
+ # Answer for the second election
+polling_houses_Apr <- 
+  Q9_1 |>
+  filter(date_elec < "2019-05-01") |> 
+  filter(ranking <=3 | ranking > 11) |> 
+  select(-id_pollster, -date_elec) |> 
+  arrange(median_error)
+polling_houses_Apr
+```
+:::
+
+::: fragment
+**November's Election**
+
+```{r eval=TRUE, echo=TRUE, }
+polling_houses_Nov <- 
+  Q9_1 |>
+  filter(date_elec > "2019-05-01") |> 
+  filter(ranking <=3 | ranking > 15) |> 
+  select(-id_pollster, -date_elec) |> 
+  arrange(median_error)
+polling_houses_Nov
+```
+:::
+
+# Thanks
