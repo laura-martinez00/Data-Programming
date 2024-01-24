@@ -227,7 +227,7 @@ map_data_apr <- map_data |>
   filter(date == "2019-04-01")
 
 map_data_nov <- map_data |> 
-  filter(date == "2019-04-01")
+  filter(date == "2019-11-01")
 ```
 
 ```{r}
